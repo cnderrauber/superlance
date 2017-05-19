@@ -68,6 +68,10 @@ Options:
       be used in the email subject to identify which memmon process
       restarted the process.
 
+-e -- optionally specify the max count of established socket of the process. If
+      the count of process's established socket >= the max count, it won't be
+      restart even it uses more than byte_size RSS.
+
 The -p and -g options may be specified more than once, allowing for
 specification of multiple groups and processes.
 
@@ -100,7 +104,7 @@ def shell(cmd):
         return f.read()
 
 class Memmon:
-    def __init__(self, cumulative, programs, groups, any, sendmail, email, email_uptime_limit, name, rpc=None):
+    def __init__(self, cumulative, programs, groups, any, sendmail, email, email_uptime_limit, name, established, rpc=None):
         self.cumulative = cumulative
         self.programs = programs
         self.groups = groups
@@ -109,12 +113,14 @@ class Memmon:
         self.email = email
         self.email_uptime_limit = email_uptime_limit
         self.name = name
+        self.established = established
         self.rpc = rpc
         self.stdin = sys.stdin
         self.stdout = sys.stdout
         self.stderr = sys.stderr
         self.pscommand = 'ps -orss= -p %s'
         self.pstreecommand = 'ps ax -o "pid= ppid= rss="'
+        self.escommand = 'netstat -tnp | grep %s | grep -v "0.0.0.0" | grep ESTABLISHED | wc -l'
         self.mailed = False # for unit tests
 
     def runforever(self, test=False):
@@ -172,6 +178,10 @@ class Memmon:
                     if n in self.programs:
                         self.stderr.write('RSS of %s is %s\n' % (pname, rss))
                         if  rss > self.programs[name]:
+                            if self.established < maxint:
+                                es = self.calc_established(pid)
+                                if es is not None and es > self.established:
+                                    continue
                             self.restart(pname, rss)
                             continue
 
@@ -240,6 +250,18 @@ class Memmon:
             return 'memmon: %s' % subject
         else:
             return 'memmon [%s]: %s' % (self.name, subject)
+
+    def calc_established(self, pid):
+        data = shell(self.escommand % pid)
+        if not data:
+            return None
+        try:
+            es = data.lstrip().rstrip()
+            es = int(es)
+        except ValueError:
+            # line doesn't contain any data, or rss cant be intified
+            return None
+        return es
 
     def calc_rss(self, pid):
         ProcInfo = namedtuple('ProcInfo', ['pid', 'ppid', 'rss'])
@@ -338,7 +360,7 @@ def parse_seconds(option, value):
 help_request = object()  # returned from memmon_from_args to indicate --help
 
 def memmon_from_args(arguments):
-    short_args = "hcp:g:a:s:m:n:u:"
+    short_args = "hcp:g:a:s:m:n:u:e:"
     long_args = [
         "help",
         "cumulative",
@@ -349,6 +371,7 @@ def memmon_from_args(arguments):
         "email=",
         "uptime=",
         "name=",
+        "established=",
         ]
 
     if not arguments:
@@ -366,6 +389,7 @@ def memmon_from_args(arguments):
     email = None
     uptime_limit = maxint
     name = None
+    established = maxint
 
     for option, value in opts:
 
@@ -399,6 +423,9 @@ def memmon_from_args(arguments):
         if option in ('-n', '--name'):
             name = value
 
+        if option in ('-e', '--established'):
+            established = int(value)
+
     memmon = Memmon(cumulative=cumulative,
                     programs=programs,
                     groups=groups,
@@ -406,7 +433,8 @@ def memmon_from_args(arguments):
                     sendmail=sendmail,
                     email=email,
                     email_uptime_limit=uptime_limit,
-                    name=name)
+                    name=name,
+                    established=established)
     return memmon
 
 def main():
